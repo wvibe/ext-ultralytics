@@ -113,7 +113,13 @@ class BaseTrainer:
         # Dirs
         self.save_dir = get_save_dir(self.args)
         self.args.name = self.save_dir.name  # update name for loggers
-        self.wdir = self.save_dir / "weights"  # weights dir
+
+        # Handle custom root directories for weights and CSV results
+        if self.args.wdir_root:
+            self.wdir = Path(self.args.wdir_root) / self.save_dir.name / "weights"  # weights dir
+        else:
+            self.wdir = self.save_dir / "weights"  # weights dir
+
         if RANK in {-1, 0}:
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
@@ -148,7 +154,16 @@ class BaseTrainer:
         self.loss = None
         self.tloss = None
         self.loss_names = ["Loss"]
-        self.csv = self.save_dir / "results.csv"
+
+        # Handle custom root directory for CSV results
+        if self.args.csv_root:
+            csv_dir = Path(self.args.csv_root) / self.save_dir.name
+            if RANK in {-1, 0}:
+                csv_dir.mkdir(parents=True, exist_ok=True)  # make csv dir
+            self.csv = csv_dir / "results.csv"
+        else:
+            self.csv = self.save_dir / "results.csv"
+
         self.plot_idx = [0, 1, 2]
 
         # HUB
@@ -690,12 +705,13 @@ class BaseTrainer:
 
     def save_metrics(self, metrics):
         """Save training metrics to a CSV file."""
-        keys, vals = list(metrics.keys()), list(metrics.values())
-        n = len(metrics) + 2  # number of cols
-        s = "" if self.csv.exists() else (("%s," * n % tuple(["epoch", "time"] + keys)).rstrip(",") + "\n")  # header
-        t = time.time() - self.train_time_start
-        with open(self.csv, "a", encoding="utf-8") as f:
-            f.write(s + ("%.6g," * n % tuple([self.epoch + 1, t] + vals)).rstrip(",") + "\n")
+        if RANK in {-1, 0}:  # Only main process writes to CSV
+            keys, vals = list(metrics.keys()), list(metrics.values())
+            n = len(metrics) + 2  # number of cols
+            s = "" if self.csv.exists() else (("%s," * n % tuple(["epoch", "time"] + keys)).rstrip(",") + "\n")
+            t = time.time() - self.train_time_start
+            with open(self.csv, "a", encoding="utf-8") as f:
+                f.write(s + ("%.6g," * n % tuple([self.epoch + 1, t] + vals)).rstrip(",") + "\n")
 
     def plot_metrics(self):
         """Plot and display metrics visually."""
