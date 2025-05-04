@@ -1,6 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 from ultralytics.utils import LOGGER, SETTINGS, TESTS_RUNNING
+from ultralytics.utils.metrics import DetMetrics, OBBMetrics, PoseMetrics, SegmentMetrics
 from ultralytics.utils.torch_utils import model_info_for_loggers
 
 try:
@@ -154,13 +155,110 @@ def on_pretrain_routine_start(trainer):
             # wb = None # Do not set wb to None globally
 
 
+def _log_per_class_metrics(metrics, names, step):
+    """Helper function to log per-class metrics based on validator type."""
+    if not (metrics and names):
+        return  # Do nothing if metrics or names are missing
+
+    per_class_log = {}
+    try:
+        if isinstance(metrics, (SegmentMetrics, PoseMetrics)):  # Handles Segment and Pose (inherits)
+            # Use box metrics' class index as reference (should be same for seg/pose)
+            if (
+                hasattr(metrics.box, "ap_class_index")
+                and hasattr(metrics.box, "p")
+                and hasattr(metrics.box, "r")
+                and hasattr(metrics.box, "all_ap")
+                and hasattr(metrics.box, "maps")
+            ):
+                metric_box = metrics.box
+                metric_seg_or_pose = metrics.seg if isinstance(metrics, SegmentMetrics) else metrics.pose
+                metric_suffix = "(M)" if isinstance(metrics, SegmentMetrics) else "(P)"
+
+                if (
+                    hasattr(metric_seg_or_pose, "p")
+                    and hasattr(metric_seg_or_pose, "r")
+                    and hasattr(metric_seg_or_pose, "all_ap")
+                    and hasattr(metric_seg_or_pose, "maps")
+                ):
+                    num_classes_with_data = len(metric_box.ap_class_index)
+                    # Basic length check
+                    if (
+                        len(metric_box.p) == num_classes_with_data
+                        and len(metric_seg_or_pose.p) == num_classes_with_data
+                    ):
+                        for idx, class_index in enumerate(metric_box.ap_class_index):
+                            class_name = names.get(class_index, f"class_{class_index}")
+                            # Box Metrics
+                            per_class_log[f"class/{class_name}/P(B)"] = metric_box.p[idx]
+                            per_class_log[f"class/{class_name}/R(B)"] = metric_box.r[idx]
+                            per_class_log[f"class/{class_name}/mAP50(B)"] = metric_box.all_ap[idx, 0]
+                            per_class_log[f"class/{class_name}/mAP50-95(B)"] = metric_box.maps[idx]
+                            # Mask/Pose Metrics
+                            per_class_log[f"class/{class_name}/P{metric_suffix}"] = metric_seg_or_pose.p[idx]
+                            per_class_log[f"class/{class_name}/R{metric_suffix}"] = metric_seg_or_pose.r[idx]
+                            per_class_log[f"class/{class_name}/mAP50{metric_suffix}"] = metric_seg_or_pose.all_ap[
+                                idx, 0
+                            ]
+                            per_class_log[f"class/{class_name}/mAP50-95{metric_suffix}"] = metric_seg_or_pose.maps[idx]
+                    else:
+                        LOGGER.warning(f"W&B Callback: Length mismatch in {type(metrics).__name__} metrics arrays.")
+                else:
+                    LOGGER.warning(
+                        f"W&B Callback: {type(metrics).__name__} seg/pose metrics object missing attributes."
+                    )
+            else:
+                LOGGER.warning(f"W&B Callback: {type(metrics).__name__} box metrics object missing attributes.")
+
+        elif isinstance(metrics, (DetMetrics, OBBMetrics)):  # Handles Det and OBB (which uses metrics.box internally)
+            metric_source = metrics if isinstance(metrics, DetMetrics) else metrics.box
+            metric_suffix = "(B)"
+            if (
+                hasattr(metric_source, "ap_class_index")
+                and hasattr(metric_source, "p")
+                and hasattr(metric_source, "r")
+                and hasattr(metric_source, "all_ap")
+                and hasattr(metric_source, "maps")
+            ):
+                num_classes_with_data = len(metric_source.ap_class_index)
+                if len(metric_source.p) == num_classes_with_data:  # Basic length check
+                    for idx, class_index in enumerate(metric_source.ap_class_index):
+                        class_name = names.get(class_index, f"class_{class_index}")
+                        per_class_log[f"class/{class_name}/P{metric_suffix}"] = metric_source.p[idx]
+                        per_class_log[f"class/{class_name}/R{metric_suffix}"] = metric_source.r[idx]
+                        per_class_log[f"class/{class_name}/mAP50{metric_suffix}"] = metric_source.all_ap[idx, 0]
+                        per_class_log[f"class/{class_name}/mAP50-95{metric_suffix}"] = metric_source.maps[idx]
+                else:
+                    LOGGER.warning(f"W&B Callback: Length mismatch in {type(metrics).__name__} metrics arrays.")
+            else:
+                LOGGER.warning(f"W&B Callback: {type(metrics).__name__} metrics object missing attributes.")
+
+        else:
+            LOGGER.warning(f"W&B Callback: Unrecognized metrics type {type(metrics).__name__} for per-class logging.")
+
+        if per_class_log:
+            wb.run.log(per_class_log, step=step)
+
+    except Exception as e:
+        LOGGER.error(f"W&B Callback: Error during per-class metric logging: {e}", exc_info=True)  # Log traceback
+
+
 def on_fit_epoch_end(trainer):
     """Log training metrics and model information at the end of an epoch."""
-    wb.run.log(trainer.metrics, step=trainer.epoch + 1)
-    _log_plots(trainer.plots, step=trainer.epoch + 1)
-    _log_plots(trainer.validator.plots, step=trainer.epoch + 1)
-    if trainer.epoch == 0:
-        wb.run.log(model_info_for_loggers(trainer), step=trainer.epoch + 1)
+    if wb.run:
+        # Log standard combined metrics
+        wb.run.log(trainer.metrics, step=trainer.epoch + 1)
+
+        # Log per-class metrics using helper function
+        metrics = getattr(trainer.validator, "metrics", None)
+        names = getattr(trainer.validator, "names", None)
+        _log_per_class_metrics(metrics, names, trainer.epoch + 1)  # Call the helper
+
+        # Log plots and model info
+        _log_plots(trainer.plots, step=trainer.epoch + 1)
+        _log_plots(trainer.validator.plots, step=trainer.epoch + 1)
+        if trainer.epoch == 0:
+            wb.run.log(model_info_for_loggers(trainer), step=trainer.epoch + 1)
 
 
 def on_train_epoch_end(trainer):
