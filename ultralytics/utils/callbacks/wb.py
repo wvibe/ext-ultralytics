@@ -1,6 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-from ultralytics.utils import SETTINGS, TESTS_RUNNING
+from ultralytics.utils import LOGGER, SETTINGS, TESTS_RUNNING
 from ultralytics.utils.torch_utils import model_info_for_loggers
 
 try:
@@ -125,11 +125,33 @@ def _log_plots(plots, step):
 def on_pretrain_routine_start(trainer):
     """Initiate and start wandb project if module is present."""
     if not wb.run:
-        wb.init(
-            project=str(trainer.args.project).replace("/", "-") if trainer.args.project else "Ultralytics",
-            name=str(trainer.args.name).replace("/", "-"),
-            config=vars(trainer.args),
-        )
+        try:  # Known unknown crash if telemetry disabled wandb.require(\"strict\")
+            wandb_id_to_resume = getattr(trainer.args, "wandb_id", None) if trainer.resume else None
+
+            init_args = {
+                "project": str(trainer.args.project).replace("/", "-") if trainer.args.project else "Ultralytics",
+                "name": str(trainer.args.name).replace("/", "-"),
+                "config": vars(trainer.args),
+            }
+
+            if wandb_id_to_resume:
+                LOGGER.info(f"Attempting to resume W&B run with ID {wandb_id_to_resume}")
+                init_args["id"] = wandb_id_to_resume
+                init_args["resume"] = "allow"  # Use "allow" for robustness
+
+            wb.init(**init_args)
+
+            # Store the run ID (either new or resumed) back into args for checkpointing
+            if wb.run:
+                trainer.args.wandb_id = wb.run.id
+                LOGGER.info(f"W&B run ID {wb.run.id} initialized successfully.")
+            else:  # Handle case where init might fail silently or resuming failed and returned None
+                LOGGER.warning("WandB initialization failed or did not return a run object.")
+                trainer.args.wandb_id = None  # Ensure it's None if init fails
+
+        except Exception as e:
+            LOGGER.warning(f"WARNING ⚠️ WandB installed but not initialized correctly, not logging this run. {e}")
+            # wb = None # Do not set wb to None globally
 
 
 def on_fit_epoch_end(trainer):

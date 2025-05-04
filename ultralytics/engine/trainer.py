@@ -747,18 +747,33 @@ class BaseTrainer:
                 last = Path(check_file(resume) if exists else get_latest_run())
 
                 # Check that resume data YAML exists, otherwise strip to force re-download of dataset
-                ckpt_args = attempt_load_weights(last).args
-                if not isinstance(ckpt_args["data"], dict) and not Path(ckpt_args["data"]).exists():
-                    ckpt_args["data"] = self.args.data
+                ckpt = attempt_load_weights(last)
+                ckpt_train_args = ckpt.get("train_args", {})  # Extract saved train_args
+                if (
+                    not isinstance(ckpt_train_args.get("data"), dict)
+                    and not Path(ckpt_train_args.get("data", "")).exists()
+                ):
+                    LOGGER.warning("Saved data path not found, using current 'data' argument.")
+                    ckpt_train_args["data"] = self.args.data  # Use current data arg if saved one is invalid
+
+                # Extract wandb_id before recreating args
+                wandb_id_to_resume = ckpt_train_args.get("wandb_id")
 
                 resume = True
-                self.args = get_cfg(ckpt_args)
-                self.args.model = self.args.resume = str(last)  # reinstate model
+                self.args = get_cfg(ckpt_train_args)  # Create new args from checkpoint args
+                self.args.model = self.args.resume = str(last)  # reinstate model and resume path
+
+                # Set wandb_id in the new args object if it was found
+                if wandb_id_to_resume:
+                    self.args.wandb_id = wandb_id_to_resume
+
+                # Apply overrides for specific arguments
                 for k in (
                     "imgsz",
                     "batch",
                     "device",
                     "close_mosaic",
+                    "epochs",  # Allow overriding epochs on resume
                 ):  # allow arg updates to reduce memory or update device on resume
                     if k in overrides:
                         setattr(self.args, k, overrides[k])
