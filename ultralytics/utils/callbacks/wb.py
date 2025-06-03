@@ -211,7 +211,7 @@ def _log_per_class_metrics(metrics, names, step):
                 LOGGER.warning(f"W&B Callback: {type(metrics).__name__} box metrics object missing attributes.")
 
         elif isinstance(metrics, (DetMetrics, OBBMetrics)):  # Handles Det and OBB (which uses metrics.box internally)
-            metric_source = metrics if isinstance(metrics, DetMetrics) else metrics.box
+            metric_source = metrics.box  # Both DetMetrics and OBBMetrics use .box
             metric_suffix = "(B)"
             if (
                 hasattr(metric_source, "ap_class_index")
